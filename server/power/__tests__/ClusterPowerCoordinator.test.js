@@ -86,6 +86,17 @@ test("resume failure remains visible and retryable", async () => {
   assert.equal(calls.length, 2);
 });
 
+test("Wake All while already online reports a no-op honestly", async () => {
+  const { coordinator } = fixture([
+    { action: "resume", model: "glm53", changed: false },
+  ]);
+  coordinator.startResume();
+  await coordinator.waitForResumeForTest();
+  assert.equal(coordinator.status().status, "success");
+  assert.match(coordinator.status().message, /already active/i);
+  assert.doesNotMatch(coordinator.status().message, /passed readiness/i);
+});
+
 test("a dashboard restart converts an in-flight operation into retryable failure", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sparkdash-power-restart-"));
   const statePath = path.join(dir, "power-operation.json");
