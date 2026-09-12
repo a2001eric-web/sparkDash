@@ -131,7 +131,7 @@ export function ConfirmShutdownDialog({
               disabled={submitting}
               onChange={(e) => setAcknowledged(e.target.checked)}
             />
-            <span>I understand this cannot be undone from the dashboard.</span>
+            <span>I understand the nodes will go offline until I use Wake All.</span>
           </label>
 
           <div className="field">

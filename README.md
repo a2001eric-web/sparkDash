@@ -145,6 +145,8 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Spark uptime** | System uptime displayed inline on each Spark header for at-a-glance availability |
 | **Power controls** | Graceful shutdown (SSH host script). Wake-on-LAN is for dedicated GPU hosts whose NIC supports it. DGX Spark does not wake from a magic packet |
 | **Spark roles** | **Head** / **Worker** / **Standalone** — worker label + head link; standalone can disable LLM monitoring; optional hide workers from Overview and tabs |
+| **Power controls** | Graceful shutdown and burst Wake-on-LAN; optional cluster-aware drain + exact-model restore |
+| **Spark roles** | **Head** / **Worker** / **Standalone** — worker label + head link; standalone can disable LLM monitoring |
 | **Unified memory** | GB10 128 GB LPDDR5X pool (~273 GB/s), GPU/CPU split, bandwidth via `nvidia-smi dmon`. Non-Spark hosts show discrete **VRAM** (nvidia-smi) and system **RAM** separately |
 | **Health findings** | Small explainable rules over metrics already collected: GPU running hot (85 / 90 °C), GPU stuck in a low-power state, unified memory low (under 3 GB warns, under 1.5 GB critical), NVIDIA **Xid** errors and kernel **OOM kills**, several models loaded while memory is busy, a link slower than 1 Gb/s, and RoCE link / loss. Shown as chips on the cards and in full on the unit page; changes are logged to **Activity** |
 | **Fleet pages** | **Token totals** (per model, hourly / daily history), **Fleet energy** (rolling 24 h / 31 d plus a permanent monthly archive, optional cost), and **Activity** (event log with filters). Each page can be cleared or reset from its **Clear / Reset…** menu |
@@ -1012,6 +1014,15 @@ units do not display stale discovered models.
 - On a **Windows PC** shutdown runs `shutdown.exe /s /t 5` over SSH; Wake-on-LAN needs a MAC address entered by hand.
 - Batch shutdown only targets **online** Sparks; offline nodes are skipped.
 - Power APIs are mutations: with `SPARKDASH_TOKEN` set they require it; without it they are open on loopback (local trust) **and** on a remote bind, unless `SPARKDASH_ALLOW_OPEN_REMOTE=0` makes that bind fail closed.
+- **Shutdown** (per Spark or **Shutdown All** on Overview) runs over SSH:  
+  `sudo -n /usr/local/bin/spark-shutdown`  
+  Run `sudo ops/install-dgx-node-power.sh` on each Spark to install the helper,
+  a command-scoped sudoers rule, and persistent NetworkManager WoL (`magic`) on
+  `enP7s7`.
+- **Wake** / **Wake All** send a three-packet UDP magic burst (port 9). The MAC is taken from the **enP7s7** interface automatically while the Spark is online (persisted as `detectedMacAddress`). Optionally set a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
+- Optional `DGX_CLUSTER_POWER_HELPER=/absolute/path/to/helper` turns a one-head / one-worker pair into a managed power domain. **Shutdown All** requires both nodes online, drains requests, saves the active model, stops all managed deployments, arms a short-lived transaction, then powers off worker before head. Per-node shutdown is blocked for the pair. **Wake All** starts both nodes, waits for LAN + reciprocal CX7 readiness, then restores and smoke-tests the exact saved model. Progress is durable at `POWER_OPERATION_JSON_PATH` (default `config/power-operation.json`).
+- Without `DGX_CLUSTER_POWER_HELPER`, batch controls retain the generic per-node behavior; offline nodes are skipped.
+- Same trust model as the rest of the API: **do not expose port 5555** beyond a trusted network — power actions are not separately authenticated.
 
 ### Themes
 

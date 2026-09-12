@@ -314,6 +314,9 @@ Quality bench by Mia's AI Lab.
 
 ### Changed
 - **Decode bench code concurrency** — each concurrent code stream is a different Python task (binary search, LRU, …), starting with its own name so the prompts do not share a prefix. The code warmup is a separate `warmup_noop` prompt, so stream 1 is not a cache hit of the warmup. Concurrency 1 is `binary_search`.
+### Added
+- **Managed two-node power lifecycle** — optional `DGX_CLUSTER_POWER_HELPER` integration makes Shutdown All drain requests, save the active model, stop managed workloads and power off worker before head through a short-lived transaction. Wake All sends three WoL packets per node, follows durable restore progress, waits for LAN/CX7 readiness and restores the exact saved model. Individual power actions cannot split a managed head/worker pair.
+- **Node power installer** — `ops/install-dgx-node-power.sh` installs the validated shutdown helper, command-scoped passwordless sudo, and persistent NetworkManager WoL magic mode.
 
 ---
 

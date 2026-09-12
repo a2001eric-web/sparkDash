@@ -1,8 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AlertInstance, SparkSnapshot } from "../../api/types";
-import { isWorkerSpark } from "../../api/sparkRole";
-import { updateAllHermes, wakeAllSparks } from "../../api/client";
+import { isWorkerSpark, resolveSparkRole } from "../../api/sparkRole";
+import {
+  fetchPowerOperation,
+  shutdownAllSparks,
+  updateAllHermes,
+  wakeAllSparks,
+} from "../../api/client";
+import type { PowerOperation } from "../../api/client";
 import { ShutdownAll } from "../ShutdownAll";
+import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
 import { FleetEnergyCard } from "./FleetEnergyCard";
 import { FleetAlertStrip } from "./FleetAlertStrip";
 import { FleetTokenTotals } from "./FleetTokenTotals";
@@ -11,7 +18,8 @@ import { FleetKpis, type KpiVisibility } from "./FleetKpis";
 import { ACTIVITY_ID, ENERGY_ID, TOKENS_ID } from "../../constants";
 import { SparkCard } from "./SparkCard";
 import { ActivityFeed } from "./ActivityFeed";
-import { ActivityIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
+import { MetricBar } from "../ui/MetricBar";
+import { ActivityIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 import { formatMb } from "../../shared/formatBytes";
 import { vramContextFor } from "../../shared/vramBreakdown";
 import { makeHeadResolver } from "../../shared/sparkHead";
@@ -95,12 +103,39 @@ export function OverviewPage({
   const hiddenWorkerCount = hideWorkers ? sparks.filter(isWorkerSpark).length : 0;
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchMsg, setBatchMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
+  const [shutdownOpen, setShutdownOpen] = useState(false);
+  const [powerOperation, setPowerOperation] = useState<PowerOperation | null>(null);
   /** Spark ids we started a batch Hermes update on; drives the live progress bar. */
   const [batchRun, setBatchRun] = useState<string[] | null>(null);
 
   const onlineShutdownCount = sparks.filter((s) => s.online).length;
   const hermesMonitoredCount = sparks.filter((s) => s.hermes?.monitoring).length;
   const hermesPendingUpdateCount = sparks.filter((s) => s.hermes?.updateAvailable === true).length;
+  const powerRunning = powerOperation?.status === "running";
+  const showPowerOperation = Boolean(
+    powerOperation &&
+      powerOperation.status !== "idle" &&
+      (powerOperation.status !== "success" ||
+        Date.now() - Date.parse(powerOperation.updatedAt) < 60_000),
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const next = await fetchPowerOperation();
+        if (!cancelled) setPowerOperation(next);
+      } catch {
+        // WebSocket snapshots remain useful if this optional endpoint is unavailable.
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), powerRunning ? 2000 : 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [powerRunning]);
 
   // Live batch progress — counted from WS snapshots, not from the one-shot HTTP response.
   const batchProg = (() => {
@@ -168,17 +203,57 @@ export function OverviewPage({
     }
   }
 
+  async function handleShutdownAll() {
+    if (onlineShutdownCount === 0) return;
+    setBatchLoading(true);
+    setBatchMsg(null);
+    try {
+      const res = await shutdownAllSparks();
+      if (res.operation) setPowerOperation(res.operation);
+      const ok = res.results.filter((r) => r.ok).length;
+      const fail = res.results.filter((r) => !r.ok && !r.skipped).length;
+      const skipped = res.results.filter((r) => r.skipped).length;
+      const parts = [res.operation?.message || `${ok} shut down`];
+      if (fail) parts.push(`${fail} failed`);
+      if (skipped) parts.push(`${skipped} skipped`);
+      setBatchMsg(
+        res.operation
+          ? null
+          : {
+              text: parts.join(", "),
+              tone: fail === 0 ? "ok" : "err",
+            },
+      );
+    } catch (err: unknown) {
+      setBatchMsg({
+        text: err instanceof Error ? err.message : "Batch shutdown failed",
+        tone: "err",
+      });
+    } finally {
+      setBatchLoading(false);
+      setTimeout(() => setBatchMsg(null), 6000);
+    }
+  }
+
   async function handleWakeAll() {
     setBatchLoading(true);
     setBatchMsg(null);
     try {
       const res = await wakeAllSparks();
+      if (res.operation) setPowerOperation(res.operation);
       const ok = res.results.filter((r) => r.ok).length;
       const fail = res.results.filter((r) => !r.ok).length;
-      setBatchMsg({
-        text: fail === 0 ? `${ok} wake packet(s) sent` : `${ok} sent, ${fail} failed`,
-        tone: fail === 0 ? "ok" : "err",
-      });
+      setBatchMsg(
+        res.operation
+          ? null
+          : {
+              text:
+                fail === 0
+                  ? `${ok} wake packet burst(s) sent`
+                  : `${ok} sent, ${fail} failed`,
+              tone: fail === 0 ? "ok" : "err",
+            },
+      );
     } catch (err: unknown) {
       setBatchMsg({
         text: err instanceof Error ? err.message : "Batch wake failed",
@@ -235,6 +310,23 @@ export function OverviewPage({
               {batchMsg.text}
             </span>
           )}
+          {powerOperation && showPowerOperation && (
+            <span
+              className={`max-w-xl text-right text-[11px] ${
+                powerOperation.status === "failed"
+                  ? "text-danger"
+                  : powerOperation.status === "success"
+                    ? "text-success"
+                    : "text-warning"
+              }`}
+              title={powerOperation.resumeModel || undefined}
+            >
+              {powerOperation.status === "running" && (
+                <RotateIcon className="mr-1 inline h-3 w-3 animate-spin" />
+              )}
+              {powerOperation.message}
+            </span>
+          )}
           {batchProg && (
             <div className="ov-prog">
               <span className="ov-prog__label">
@@ -259,7 +351,7 @@ export function OverviewPage({
                 <button
                   type="button"
                   onClick={() => void handleUpdateAllHermes()}
-                  disabled={batchLoading}
+                  disabled={batchLoading || powerRunning}
                   title="Run `hermes update` on every Spark with Hermes Agent enabled"
                   className={`btn ${hermesPendingUpdateCount > 0 ? "ov-btn--pending" : ""}`}
                 >
@@ -287,7 +379,26 @@ export function OverviewPage({
                   Wake all
                 </button>
               )}
-              <ShutdownAll sparks={sparks} className="ov-shutdown" />
+              <button
+                type="button"
+                onClick={() => void handleWakeAll()}
+                disabled={batchLoading || powerRunning}
+                title="Wake all Sparks that have a MAC configured (WoL)"
+                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted hover:bg-success/20 hover:text-success transition-colors disabled:opacity-50"
+              >
+                <PowerOnIcon className="h-3 w-3" />
+                Wake All
+              </button>
+              <button
+                type="button"
+                onClick={() => setShutdownOpen(true)}
+                disabled={batchLoading || powerRunning || onlineShutdownCount === 0}
+                title="Shut down all online Sparks"
+                className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:bg-danger/20 hover:text-danger disabled:opacity-50"
+              >
+                <PowerOffIcon className="h-3 w-3" />
+                Shutdown All
+              </button>
             </>
           )}
         </div>
@@ -300,6 +411,15 @@ export function OverviewPage({
         temperatureUnit={temperatureUnit}
         alertsEnabled={alertsEnabled}
         serverAlerts={serverAlerts}
+      />
+
+      <ConfirmShutdownDialog
+        open={shutdownOpen}
+        onClose={() => setShutdownOpen(false)}
+        onConfirm={handleShutdownAll}
+        title="Shutdown All"
+        description={`Drain requests, save the active model, shut down worker then head, and power off both nodes. Wake All will boot both nodes and restore the same model automatically.`}
+        confirmLabel="Shut down all"
       />
 
       {showOverviewSearch ? (

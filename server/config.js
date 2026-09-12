@@ -44,6 +44,11 @@ const MODEL_PRICES_JSON_PATH =
 const MODEL_PRICES_FETCH = ["1", "true"].includes(
   String(process.env.MODEL_PRICES_FETCH || "").toLowerCase()
 );
+/** Durable UI status for long-running cluster power restore operations. */
+const POWER_OPERATION_JSON_PATH =
+  process.env.POWER_OPERATION_JSON_PATH || path.join(ROOT, "config", "power-operation.json");
+/** Optional cluster-aware helper. Empty preserves generic per-node behavior. */
+const DGX_CLUSTER_POWER_HELPER = String(process.env.DGX_CLUSTER_POWER_HELPER || "").trim();
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -221,6 +226,8 @@ export {
   ALERTS_JSON_PATH,
   MODEL_PRICES_JSON_PATH,
   MODEL_PRICES_FETCH,
+  POWER_OPERATION_JSON_PATH,
+  DGX_CLUSTER_POWER_HELPER,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   TAILSCALE_PROBE_TIMEOUT_MS,
