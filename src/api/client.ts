@@ -383,6 +383,17 @@ export interface PowerResult {
   error?: string;
 }
 
+export interface PowerOperation {
+  configured: boolean;
+  action: "" | "shutdown" | "resume";
+  status: "idle" | "running" | "suspended" | "success" | "failed";
+  phase: string;
+  message: string;
+  resumeModel: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
 export interface BatchPowerResult {
   success: boolean;
   results: {
@@ -392,7 +403,10 @@ export interface BatchPowerResult {
     skipped?: boolean;
     mac?: string;
     broadcast?: string;
+    packets?: number;
+    message?: string;
   }[];
+  operation?: PowerOperation;
 }
 
 /** Gracefully shut down a single Spark (host script: spark-shutdown). */
@@ -413,6 +427,11 @@ export function shutdownAllSparks(): Promise<BatchPowerResult> {
 /** Send WoL to all registered Sparks that have a MAC configured. */
 export function wakeAllSparks(): Promise<BatchPowerResult> {
   return apiFetch("/api/sparks/wake-all", { method: "POST" });
+}
+
+/** Durable progress for cluster drain, power-off, boot and model restore. */
+export function fetchPowerOperation(): Promise<PowerOperation> {
+  return apiFetch("/api/sparks/power-operation");
 }
 
 // ─── Hermes update preview ───────────────────────────────

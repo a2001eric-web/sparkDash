@@ -12,7 +12,13 @@ import { sshExec, sshTest, llmTest, comfyTest } from "./collectors/ssh.js";
 import { comfyCancelJob } from "./collectors/comfyActions.js";
 import { validateSparkTarget, createRateLimiter } from "./validate.js";
 import { getSettings, updateSettings, loadSettings } from "./settings.js";
-import { broadcastForLanIp, effectiveMac, normalizeMac, sendWol } from "./wol.js";
+import {
+  broadcastForLanIp,
+  effectiveMac,
+  normalizeMac,
+  sendWol,
+  sendWolBurst,
+} from "./wol.js";
 import {
   decodeBenchManager,
   DECODE_BENCH_DEFAULTS,
@@ -25,6 +31,12 @@ import { showcaseManager } from "./collectors/ShowcaseManager.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { llmDaily } from "./collectors/LlmDaily.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
+import {
+  DGX_CLUSTER_POWER_HELPER,
+  POWER_OPERATION_JSON_PATH,
+} from "./config.js";
+import { ClusterPowerCoordinator } from "./power/ClusterPowerCoordinator.js";
+import { resolveManagedPair, shutdownManagedPair } from "./power/clusterPlan.js";
 
 dotenv.config();
 
@@ -39,6 +51,12 @@ const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 const PORT = parseInt(process.env.PORT || "5555", 10);
 const LLM_PORT = parseInt(process.env.LLM_PORT || "8888", 10);
 const COMFY_PORT = parseInt(process.env.COMFY_PORT || "8188", 10);
+const clusterPower = new ClusterPowerCoordinator({
+  // dotenv.config() runs after ESM dependencies are evaluated, so re-read the
+  // process environment here instead of relying only on config.js import time.
+  helperPath: process.env.DGX_CLUSTER_POWER_HELPER || DGX_CLUSTER_POWER_HELPER,
+  statePath: process.env.POWER_OPERATION_JSON_PATH || POWER_OPERATION_JSON_PATH,
+});
 
 /** Per-spark LLM HTTP port (1–65535), else env default. */
 function resolveLlmPort(sparkOrPort) {
@@ -1209,17 +1227,24 @@ app.delete("/api/sparks/:id/llm/showcase/:sessionId", (req, res) => {
 // expose port 5555 beyond a trusted network.
 
 const SHUTDOWN_BIN = "/usr/local/bin/spark-shutdown";
+const POWER_TRANSACTION_RE = /^[0-9a-f]{32}$/;
 /**
- * Remote: verify script + passwordless sudo, then background shutdown so SSH
- * returns before the host dies. Failures before backgrounding surface to the UI.
+ * Remote: verify script + passwordless sudo, then synchronously validate and
+ * queue systemd's non-blocking poweroff. A connection drop after systemctl was
+ * accepted is benign; authorization/argument failures still reach the UI.
  */
-const SHUTDOWN_REMOTE_CMD = [
-  `test -x ${SHUTDOWN_BIN} || { echo "missing ${SHUTDOWN_BIN}" >&2; exit 127; }`,
-  `sudo -n true || { echo "sudo -n required for ${SHUTDOWN_BIN}" >&2; exit 126; }`,
-  `nohup sudo -n ${SHUTDOWN_BIN} >/dev/null 2>&1 &`,
-  `sleep 0.3`,
-  `exit 0`,
-].join("; ");
+function shutdownRemoteCommand(transactionId) {
+  const transaction = String(transactionId || "");
+  if (transaction && !POWER_TRANSACTION_RE.test(transaction)) {
+    throw new Error("A valid prepared cluster power transaction is required");
+  }
+  const shutdownArg = transaction || "--standalone";
+  return [
+    `test -x ${SHUTDOWN_BIN} || { echo "missing ${SHUTDOWN_BIN}" >&2; exit 127; }`,
+    `sudo -n ${SHUTDOWN_BIN} --check >/dev/null || { echo "sudo -n required for ${SHUTDOWN_BIN}" >&2; exit 126; }`,
+    `sudo -n ${SHUTDOWN_BIN} ${shutdownArg}`,
+  ].join("; ");
+}
 
 function shutdownErrorStatus(msg) {
   if (/timed out|connection refused|unreachable|no route|ECONNREFUSED|ETIMEDOUT/i.test(msg)) {
@@ -1243,11 +1268,12 @@ function isBenignShutdownSshError(msg) {
  * gets a real JSON response instead of "Failed to fetch" when the SSH session
  * drops as the host powers off.
  */
-function initiateSparkShutdown(spark) {
+function initiateSparkShutdown(spark, transactionId) {
+  const remoteCommand = shutdownRemoteCommand(transactionId);
   if (spark.isLocal) {
     return new Promise((resolve, reject) => {
       try {
-        const child = spawn("sudo", ["-n", SHUTDOWN_BIN], {
+        const child = spawn("sudo", ["-n", SHUTDOWN_BIN, transactionId || "--standalone"], {
           detached: true,
           stdio: "ignore",
         });
@@ -1267,7 +1293,7 @@ function initiateSparkShutdown(spark) {
     });
   }
 
-  return sshExec(spark, SHUTDOWN_REMOTE_CMD, { timeoutMs: 8000 })
+  return sshExec(spark, remoteCommand, { timeoutMs: 8000 })
     .then(() => "Shutdown initiated")
     .catch((err) => {
       const msg = err.message || String(err);
@@ -1280,6 +1306,45 @@ function initiateSparkShutdown(spark) {
 
 /** Batch routes first so they never collide with /:id/* if routing changes. */
 app.post("/api/sparks/shutdown-all", async (_req, res) => {
+  if (clusterPower.configured) {
+    let pair;
+    try {
+      pair = resolveManagedPair(registry.sparks);
+    } catch (error) {
+      return res.status(409).json({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const ordered = [pair.worker, pair.head];
+    const offline = ordered.filter((spark) => !monitors.get(spark.id)?.online);
+    if (offline.length > 0) {
+      return res.status(409).json({
+        error: `Cluster shutdown requires both nodes online; unavailable: ${offline.map((spark) => spark.name).join(", ")}`,
+      });
+    }
+
+    let receipt;
+    try {
+      receipt = await clusterPower.prepareShutdown();
+    } catch (error) {
+      return res.status(503).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+
+    const results = await shutdownManagedPair(
+      pair,
+      receipt.transaction_id,
+      initiateSparkShutdown,
+    );
+    const operation = clusterPower.recordShutdown(results);
+    const success = results.every((result) => result.ok);
+    return res.status(success ? 200 : 503).json({
+      success,
+      results,
+      operation,
+      ...(success ? {} : { error: operation.message }),
+    });
+  }
+
   const results = [];
   // Remotes first, local last — shutting down the dashboard host mid-loop would
   // skip remaining Sparks.
@@ -1298,13 +1363,13 @@ app.post("/api/sparks/shutdown-all", async (_req, res) => {
       if (spark.isLocal) {
         results.push({ id: spark.id, ok: true, message: "Shutdown initiated" });
         setImmediate(() => {
-          void initiateSparkShutdown(spark).catch((err) => {
+          void initiateSparkShutdown(spark, null).catch((err) => {
             console.error(`[shutdown-all] local ${spark.id}:`, err.message);
           });
         });
         continue;
       }
-      await initiateSparkShutdown(spark);
+      await initiateSparkShutdown(spark, null);
       results.push({ id: spark.id, ok: true });
     } catch (err) {
       results.push({ id: spark.id, ok: false, error: err.message || String(err) });
@@ -1315,6 +1380,19 @@ app.post("/api/sparks/shutdown-all", async (_req, res) => {
 
 app.post("/api/sparks/wake-all", async (_req, res) => {
   const results = [];
+  let managedPair = null;
+  if (clusterPower.configured) {
+    try {
+      managedPair = resolveManagedPair(registry.sparks);
+    } catch {
+      // Recorded below after still attempting useful WoL for configured MACs.
+    }
+  }
+  const managedIds = new Set(
+    managedPair
+      ? [managedPair.head.id, managedPair.worker.id]
+      : registry.sparks.map((spark) => spark.id),
+  );
   for (const spark of registry.sparks) {
     const cleanMac = effectiveMac(spark);
     if (!cleanMac) {
@@ -1327,26 +1405,65 @@ app.post("/api/sparks/wake-all", async (_req, res) => {
     }
     try {
       const broadcast = broadcastForLanIp(spark.lanIp);
-      const sent = await sendWol(cleanMac, broadcast);
-      results.push({ id: spark.id, ok: true, mac: sent.mac, broadcast: sent.broadcast });
+      const sent = await sendWolBurst(cleanMac, broadcast);
+      results.push({
+        id: spark.id,
+        ok: true,
+        mac: sent.mac,
+        broadcast: sent.broadcast,
+        packets: sent.packets,
+      });
     } catch (err) {
       results.push({ id: spark.id, ok: false, error: err.message || String(err) });
     }
   }
-  res.json({ success: true, results });
+  const failed = results.filter((result) => !result.ok);
+  const managedFailed = failed.filter((result) => managedIds.has(result.id));
+  let operation = clusterPower.status();
+  if (clusterPower.configured) {
+    if (!managedPair) {
+      operation = clusterPower.recordWakeFailure(
+        "Wake All requires exactly one configured head and one worker.",
+      );
+    } else if (managedFailed.length === 0) {
+      operation = clusterPower.startResume();
+    } else {
+      operation = clusterPower.recordWakeFailure(
+        `${managedFailed.length} cluster node(s) failed Wake-on-LAN; model restore was not started.`,
+      );
+    }
+  }
+  const clusterReady = !clusterPower.configured || operation.status !== "failed";
+  res.status(clusterReady && failed.length === 0 ? 200 : 503).json({
+    success: clusterReady && failed.length === 0,
+    results,
+    operation,
+    ...(clusterReady && failed.length === 0
+      ? {}
+      : { error: operation.message || `${failed.length} Wake-on-LAN request(s) failed` }),
+  });
+});
+
+app.get("/api/sparks/power-operation", (_req, res) => {
+  res.json(clusterPower.status());
 });
 
 app.post("/api/sparks/:id/shutdown", async (req, res) => {
   try {
     const spark = registry.getSpark(req.params.id);
     if (!spark) return res.status(404).json({ error: "Spark not found" });
+    if (clusterPower.configured && (spark.role === "head" || spark.role === "worker")) {
+      return res.status(409).json({
+        error: "This node belongs to the managed two-node cluster; use Shutdown All to drain and preserve the active model.",
+      });
+    }
 
     // Local: send JSON first, then power off — otherwise the process dies mid-response
     // and the UI shows "Failed to fetch".
     if (spark.isLocal) {
       res.json({ success: true, message: "Shutdown initiated" });
       setImmediate(() => {
-        void initiateSparkShutdown(spark).catch((err) => {
+        void initiateSparkShutdown(spark, null).catch((err) => {
           console.error(`[shutdown] local ${spark.id}:`, err.message);
         });
       });
@@ -1354,7 +1471,7 @@ app.post("/api/sparks/:id/shutdown", async (req, res) => {
     }
 
     try {
-      const message = await initiateSparkShutdown(spark);
+      const message = await initiateSparkShutdown(spark, null);
       res.json({ success: true, message, output: message });
     } catch (err) {
       const msg = err.message || String(err);
@@ -1371,6 +1488,16 @@ app.post("/api/sparks/:id/wake", async (req, res) => {
   try {
     const spark = registry.getSpark(req.params.id);
     if (!spark) return res.status(404).json({ error: "Spark not found" });
+    const powerStatus = clusterPower.status();
+    if (
+      clusterPower.configured &&
+      (spark.role === "head" || spark.role === "worker") &&
+      (powerStatus.status === "suspended" || powerStatus.phase === "partial-poweroff")
+    ) {
+      return res.status(409).json({
+        error: "Use Wake All so both cluster nodes start and the saved model is restored automatically.",
+      });
+    }
 
     // Body mac > user override > auto-detected enP7s7
     const cleanMac = normalizeMac(req.body?.mac) || effectiveMac(spark);

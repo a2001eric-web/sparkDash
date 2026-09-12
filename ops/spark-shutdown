@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+AUTH_DIR="${SPARK_POWER_AUTH_DIR:-/run/spark-power}"
+AUTH_FILE="$AUTH_DIR/shutdown-authorized"
+MAX_AGE_SECONDS=600
+TRANSACTION_RE='^[0-9a-f]{32}$'
+SYSTEMCTL="${SPARK_POWER_SYSTEMCTL:-systemctl}"
+
+die() {
+  printf 'spark-shutdown: %s\n' "$*" >&2
+  exit 1
+}
+
+require_root() {
+  [[ "${SPARK_POWER_ALLOW_NONROOT:-0}" == "1" || "$(id -u)" -eq 0 ]] || die "must run as root"
+}
+
+arm() {
+  local transaction_id="$1" now temp
+  [[ "$transaction_id" =~ $TRANSACTION_RE ]] || die "invalid transaction id"
+  install -d -m 0700 "$AUTH_DIR"
+  now="$(date +%s)"
+  temp="$(mktemp "$AUTH_DIR/.shutdown-authorized.XXXXXX")"
+  trap 'rm -f "$temp"' EXIT
+  printf '%s %s\n' "$transaction_id" "$now" > "$temp"
+  chmod 0600 "$temp"
+  mv -f "$temp" "$AUTH_FILE"
+  trap - EXIT
+  printf 'armed=%s\n' "$transaction_id"
+}
+
+disarm() {
+  rm -f "$AUTH_FILE"
+  printf 'disarmed\n'
+}
+
+standalone_poweroff() {
+  sync
+  "$SYSTEMCTL" poweroff --no-block
+  printf 'poweroff_queued=standalone\n'
+}
+
+execute_poweroff() {
+  local transaction_id="$1" armed_id armed_at now age
+  [[ "$transaction_id" =~ $TRANSACTION_RE ]] || die "invalid transaction id"
+  [[ -r "$AUTH_FILE" ]] || die "cluster shutdown is not armed"
+  read -r armed_id armed_at < "$AUTH_FILE"
+  [[ "$armed_id" == "$transaction_id" ]] || die "transaction id mismatch"
+  [[ "$armed_at" =~ ^[0-9]+$ ]] || die "invalid authorization timestamp"
+  now="$(date +%s)"
+  age=$((now - armed_at))
+  (( age >= 0 && age <= MAX_AGE_SECONDS )) || die "authorization expired"
+
+  sync
+  "$SYSTEMCTL" poweroff --no-block
+  rm -f "$AUTH_FILE"
+  printf 'poweroff_queued=%s\n' "$transaction_id"
+}
+
+require_root
+case "${1:-}" in
+  --arm)
+    [[ $# -eq 2 ]] || die "--arm requires one transaction id"
+    arm "$2"
+    ;;
+  --disarm)
+    [[ $# -eq 1 ]] || die "--disarm takes no arguments"
+    disarm
+    ;;
+  --check)
+    [[ $# -eq 1 ]] || die "--check takes no arguments"
+    command -v "$SYSTEMCTL" >/dev/null 2>&1 || die "systemctl is unavailable"
+    printf 'ready\n'
+    ;;
+  --standalone)
+    [[ $# -eq 1 ]] || die "--standalone takes no arguments"
+    standalone_poweroff
+    ;;
+  *)
+    [[ $# -eq 1 ]] || die "a cluster power transaction id is required"
+    execute_poweroff "$1"
+    ;;
+esac

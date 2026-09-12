@@ -78,7 +78,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Multiple LLM ports** | Monitor several LLM servers on different ports simultaneously — each gets its own panel with independent backend detection and metrics |
 | **GPU processes** | See the top GPU processes by VRAM usage directly in the GPU panel, including process name and memory allocation |
 | **Spark uptime** | System uptime displayed inline on each Spark header for at-a-glance availability |
-| **Power controls** | Graceful shutdown (SSH host script) and Wake-on-LAN; batch actions on Overview |
+| **Power controls** | Graceful shutdown and burst Wake-on-LAN; optional cluster-aware drain + exact-model restore |
 | **Spark roles** | **Head** / **Worker** / **Standalone** — worker label + head link; standalone can disable LLM monitoring |
 | **Unified memory** | GB10 128 GB LPDDR5X pool (~273 GB/s), GPU/CPU split, bandwidth via `nvidia-smi dmon`. Non-Spark hosts show discrete **VRAM** (nvidia-smi) and system **RAM** separately |
 | **Themes** | Dark, light, cool white, OLED — neutral palettes, persisted in `localStorage` |
@@ -427,9 +427,12 @@ Copy `.env.example` to `.env` if needed:
 
 - **Shutdown** (per Spark or **Shutdown All** on Overview) runs over SSH:  
   `sudo -n /usr/local/bin/spark-shutdown`  
-  Install that script on each Spark and allow passwordless sudo for it only.
-- **Wake** / **Wake All** send a UDP magic packet (port 9). The MAC is taken from the **enP7s7** interface automatically while the Spark is online (persisted as `detectedMacAddress`). Optionally set a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
-- Batch shutdown only targets **online** Sparks; offline nodes are skipped.
+  Run `sudo ops/install-dgx-node-power.sh` on each Spark to install the helper,
+  a command-scoped sudoers rule, and persistent NetworkManager WoL (`magic`) on
+  `enP7s7`.
+- **Wake** / **Wake All** send a three-packet UDP magic burst (port 9). The MAC is taken from the **enP7s7** interface automatically while the Spark is online (persisted as `detectedMacAddress`). Optionally set a **MAC override** in Edit Spark. Broadcast is derived as `/24` from LAN IP, or `255.255.255.255` if LAN IP is missing.
+- Optional `DGX_CLUSTER_POWER_HELPER=/absolute/path/to/helper` turns a one-head / one-worker pair into a managed power domain. **Shutdown All** requires both nodes online, drains requests, saves the active model, stops all managed deployments, arms a short-lived transaction, then powers off worker before head. Per-node shutdown is blocked for the pair. **Wake All** starts both nodes, waits for LAN + reciprocal CX7 readiness, then restores and smoke-tests the exact saved model. Progress is durable at `POWER_OPERATION_JSON_PATH` (default `config/power-operation.json`).
+- Without `DGX_CLUSTER_POWER_HELPER`, batch controls retain the generic per-node behavior; offline nodes are skipped.
 - Same trust model as the rest of the API: **do not expose port 5555** beyond a trusted network — power actions are not separately authenticated.
 
 ### Themes

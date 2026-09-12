@@ -114,7 +114,7 @@ export function ConfirmShutdownDialog({
               onChange={(e) => setAcknowledged(e.target.checked)}
               className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-[var(--color-danger)]"
             />
-            <span>I understand this cannot be undone from the dashboard.</span>
+            <span>I understand the nodes will go offline until I use Wake All.</span>
           </label>
 
           <div>

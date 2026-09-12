@@ -97,3 +97,30 @@ export function sendWol(cleanMac, broadcastAddr = "255.255.255.255", port = 9) {
     });
   });
 }
+
+/**
+ * Send a short burst of magic packets. A sleeping NIC can miss a single UDP
+ * broadcast while the switch is relearning its port after link loss.
+ *
+ * @param {string} cleanMac normalized MAC
+ * @param {string} [broadcastAddr]
+ * @param {number} [count=3]
+ * @param {number} [intervalMs=250]
+ */
+export async function sendWolBurst(
+  cleanMac,
+  broadcastAddr = "255.255.255.255",
+  count = 3,
+  intervalMs = 250,
+  sendFn = sendWol,
+  sleepFn = (delay) => new Promise((resolve) => setTimeout(resolve, delay)),
+) {
+  let sent;
+  for (let index = 0; index < count; index += 1) {
+    sent = await sendFn(cleanMac, broadcastAddr);
+    if (index + 1 < count) {
+      await sleepFn(intervalMs);
+    }
+  }
+  return { ...sent, packets: count };
+}

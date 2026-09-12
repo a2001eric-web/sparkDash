@@ -18,6 +18,11 @@ const SECRETS_KEY_PATH =
 /** Daily LLM tok/s rollups (gitignored). */
 const LLM_DAILY_JSON_PATH =
   process.env.LLM_DAILY_JSON_PATH || path.join(ROOT, "config", "llm-daily.json");
+/** Durable UI status for long-running cluster power restore operations. */
+const POWER_OPERATION_JSON_PATH =
+  process.env.POWER_OPERATION_JSON_PATH || path.join(ROOT, "config", "power-operation.json");
+/** Optional cluster-aware helper. Empty preserves generic per-node behavior. */
+const DGX_CLUSTER_POWER_HELPER = String(process.env.DGX_CLUSTER_POWER_HELPER || "").trim();
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -97,6 +102,8 @@ export {
   SPARKS_SECRETS_PATH,
   SECRETS_KEY_PATH,
   LLM_DAILY_JSON_PATH,
+  POWER_OPERATION_JSON_PATH,
+  DGX_CLUSTER_POWER_HELPER,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   TAILSCALE_PROBE_TIMEOUT_MS,
