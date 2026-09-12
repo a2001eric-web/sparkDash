@@ -195,11 +195,14 @@ export class ClusterPowerCoordinator {
     });
     this._resumePromise = this._runHelper("resume", 90 * 60_000)
       .then((receipt) => {
+        const alreadyActive = receipt.changed === false;
         this._setStatus({
           status: "success",
           phase: "ready",
           resumeModel: receipt.model,
-          message: `${receipt.model} restored and passed readiness checks.`,
+          message: alreadyActive
+            ? `${receipt.model} is already active; no restore was required.`
+            : `${receipt.model} restored and passed readiness checks.`,
         });
         return receipt;
       })
