@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { SparkSnapshot } from "../../api/types";
+import { resolveSparkRole } from "../../api/sparkRole";
 import { shutdownSpark, wakeSpark } from "../../api/client";
 import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
 import { openHermesUpdateDialog } from "../../hooks/useHermesUpdateDialog";
@@ -43,6 +44,8 @@ export function shutdownWarnings(spark: SparkSnapshot): string[] {
  */
 export function SparkActions({ spark, onEdit, className }: SparkActionsProps) {
   const online = spark.online;
+  const role = resolveSparkRole(spark);
+  const clusterManaged = role === "head" || role === "worker";
   const [powerLoading, setPowerLoading] = useState(false);
   const [powerMsg, setPowerMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [shutdownOpen, setShutdownOpen] = useState(false);
@@ -157,24 +160,34 @@ export function SparkActions({ spark, onEdit, className }: SparkActionsProps) {
         {online ? (
           <button
             type="button"
-            onClick={() => setShutdownOpen(true)}
-            disabled={powerLoading}
-            title="Graceful shutdown (requires /usr/local/bin/spark-shutdown on the host)"
+            onClick={() => {
+              if (!clusterManaged) setShutdownOpen(true);
+            }}
+            disabled={powerLoading || clusterManaged}
+            title={
+              clusterManaged
+                ? "Use Shutdown All on Overview so the two-node model is drained and preserved"
+                : "Graceful shutdown (requires /usr/local/bin/spark-shutdown on the host)"
+            }
             className="btn btn--danger"
           >
             <PowerOffIcon className="h-3.5 w-3.5" />
-            Shut down
+            {clusterManaged ? "Use Shutdown All" : "Shut down"}
           </button>
         ) : spark.kind === "host" ? (
           <button
             type="button"
             onClick={() => void handleWake()}
-            disabled={powerLoading}
-            title="Wake-on-LAN (set MAC address in Edit Spark)"
+            disabled={powerLoading || clusterManaged}
+            title={
+              clusterManaged
+                ? "Use Wake All on Overview so both nodes start and the saved model is restored"
+                : "Wake-on-LAN (set MAC address in Edit Spark)"
+            }
             className="btn"
           >
             <PowerOnIcon className="h-3.5 w-3.5" />
-            Wake
+            {clusterManaged ? "Use Wake All" : "Wake"}
           </button>
         ) : (
           <span
