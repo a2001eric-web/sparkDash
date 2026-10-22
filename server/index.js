@@ -4,6 +4,7 @@ import { WebSocketServer } from "ws";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { spawn } from "node:child_process";
 import dotenv from "dotenv";
 import { SparkRegistry } from "./sparks/SparkRegistry.js";
 import { resolveFrontendDir, FRONTEND_MISSING_MESSAGE } from "./frontendDir.js";
@@ -21,7 +22,6 @@ import {
 import { authStatus, authorizeUpgrade, createAuthMiddleware, createHostGuardMiddleware, isLoopbackBind, setTailscaleName } from "./auth.js";
 import { inspectHealth } from "./health.js";
 import { getSettings, updateSettings, loadSettings } from "./settings.js";
-import { remoteShutdownCommand, spawnLocalShutdown } from "./shutdown.js";
 import { GpuClockManager } from "./gpuclock/GpuClockManager.js";
 import { registerGpuClockRoutes } from "./gpuclock/routes.js";
 import {
