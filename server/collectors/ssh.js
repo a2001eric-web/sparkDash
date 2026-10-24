@@ -37,8 +37,16 @@ function controlPersistSeconds() {
 }
 
 function ensureControlDir() {
-  fs.mkdirSync(_controlDir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(_controlDir, 0o700);
+  // Pollers call this for every SSH command. Existing private directories
+  // need no filesystem mutation (chmod alone generates macOS FSEvents).
+  try {
+    const stat = fs.statSync(_controlDir);
+    if ((stat.mode & 0o777) !== 0o700) fs.chmodSync(_controlDir, 0o700);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+    fs.mkdirSync(_controlDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(_controlDir, 0o700);
+  }
 }
 
 /**

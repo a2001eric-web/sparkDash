@@ -22,6 +22,25 @@ test("isolates password credentials without exposing them", () => {
   assert.equal(first.args.join(" ").includes("secret-one"), false);
 });
 
+test("warm SSH configs do not mutate the control directory", (t) => {
+  const mkdir = t.mock.method(fs, "mkdirSync");
+  const chmod = t.mock.method(fs, "chmodSync");
+  for (let i = 0; i < 32; i++) {
+    sshMultiplexConfig({ id: "spark-2" }, "10.0.0.2", "sparky", "key", null);
+  }
+  assert.equal(mkdir.mock.callCount(), 0);
+  assert.equal(chmod.mock.callCount(), 0);
+});
+
+test("a removed control directory is recreated privately", () => {
+  const config = sshMultiplexConfig({ id: "spark-2" }, "10.0.0.2", "sparky", "key", null);
+  const arg = config.args.find((arg) => arg.startsWith("ControlPath="));
+  const dir = arg.slice("ControlPath=".length).replace(/\/[^/]+$/, "");
+  fs.rmSync(dir, { recursive: true });
+  sshMultiplexConfig({ id: "spark-2" }, "10.0.0.2", "sparky", "key", null);
+  assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+});
+
 test("isolates different SSH ports on the same host", () => {
   const spark = { id: "test" };
   const standard = sshMultiplexConfig(spark, "192.168.1.2", "user", "key", null, 22);
